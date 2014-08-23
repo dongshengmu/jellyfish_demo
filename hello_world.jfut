@@ -1,0 +1,242 @@
+# Author: Dongsheng Mu, 02/09/2014
+
+
+#TITLE: A Hello World demo of Jellyfish
+
+
+#SUITE jellyfish tutorial with Hello World
+#=========================================
+
+
+#CASE hello world, the plain vanilla
+#DESCRIPT: This is a Hello World demo test case.
+#KEYWORD: demo
+
+# this line is a comment
+print('Hello World')
+assert 1 == 1, 'use assert to check result in the middle of test'
+True        # the evaluation result of last line is the test result
+
+
+#CASE a little spicy, devices
+
+devvm('echo "Hello World"')
+ws1('echo "Hello World"')
+o, e = vre.shell('echo "Hello World."')
+'Hello World.' in o and not e
+
+
+#CASE a little spicier, packet
+#DESCRIPT: Craft and send a packet, then sniff and show the received packet.
+
+pkt = Ether(dst=ws2.dp_mac)/IP(dst=ws2.dp_ip)/ICMP()/Raw(load='Hello World!')  # craft a packet
+res = jfapi.sniffer(iface=ws2.dp_switch, filter='icmp and host %s' % ws2.dp_ip, count=1)   # sniffing on ws2 side
+suscapy.sendp(pkt, iface=ws1.dp_switch)     # sending from ws1 side
+res[0].show()       # show the first received packet, (note, the backend handles result polling)
+suscapy.ls(res[0])  # show the protocol layers
+'Hello World!' == res[0][Raw].load  # checking result, (note, a particular layer/field can be direct accessed)
+
+
+#CASE a little more spicier, gdb
+#DESCRIPT: A sample gdb test to check some global data in the target program.
+#KEYWORD: gdb
+
+o, e = gdbflowd.cmd_in_context('p system_banner_long')
+
+gdbflowd.context(macros='$SRXSRC/build/jellyfish/gdb_macros_flowd')
+o1, e1 = gdbflowd.cmd_in_context('dump_module_list module_node_application_table')
+
+"====== NGSRX System ======" in o and 'flowd_usp_ifp_mt' in o1
+
+
+#CASE a little more spicier, gdb breakpoint
+#DESCRIPT: A sample gdb test to collect and analyze data from a running process
+#KEYWORD: gdb
+
+breakpoints = [
+    # a breakpoint can be as simple as this
+    # dict(location = 'show_version',
+    #     commands = ['p system_banner_long']),
+
+    # or can be as flexible as this one
+    dict(location = 'flowd_tap_pkt_rx', # in this function
+        match = '    return pkt_ptr;',  # break at the line with this pattern
+        show_source = True,             # print the source code, so if code refactored, we know it
+        commands = ['bt',               # show back trace
+                    'info local',       # show local variables
+                    'x/100xb pkt_ptr',  # exam mem at return pointer pkt_ptr, print 100 bytes in hex format
+                    'x/1s (char*)pkt_ptr+42', # print 1 string at the payload offset
+                    ],                  # note, jellyfish will add a 'continue' for gdb_bp cmd.
+        # condition = 'tap_fd == 0xc',    # a condition, breakpoint only hits if the pass-in
+                                          # param tap_fd is certain interface
+        # ignore_count = 5,               # only break for the 6th time hit.
+        temporary = True,               # after stop once, remove this breakpoint
+        auto_continue = False,          # telling gdb don't continue after breakpoint hit,
+                                        # the test code will explicitly continue the target program
+        ),
+    ]
+pkt = Ether(dst=ws2.dp_mac)/IP(dst=ws2.dp_ip)/ICMP()/Raw(load='Hello World!')
+
+with gdbflowd.context(breakpoints, macros=[]):
+    suscapy.sendp(pkt, iface=ws1.dp_switch)     # send a packet to trigger the breakpoint
+    o = gdbflowd.getbuf('flowd_tap_pkt_rx')     # get the gdb output of the breakpoint
+    if "Hello World!" not in o:         # check the result
+        gdbflowd.test_failed = True     # mark test failed, so if -e stop-on-error specified,
+                                        # flowd process will be stopped here for on-spot debugging
+    else:
+        gdbflowd.cont()                 # passed, let flowd continue to run.
+
+# the hex dump is not clear enough for human read, let's convert the hexdump to packet and show it.
+p = jfapi.hex2pkt(o, first_layer=Ether)
+p.show()
+
+"Hello World!" in o and p[Raw].load == 'Hello World!'
+
+
+#CASE: unit testing a function with gdb
+#DESCRIPT: A sample to unit test a function, by mocking its pass-in parameters and exam return result.
+#KEYWORD: gdb
+
+ok = True
+with gdbflowd.context(stop_target=True):
+    util.print_green('Demostrate unit test for an API function.')
+    g = gdbflowd
+    g.show_source('crc32')                          # print source code of crc32()
+    ### mocking
+    g('set $buf = (unsigned char *)malloc(20)')     # malloc a buffer
+    g('call memset($buf, 0, 20)')                   # clear the buffer
+    g('x/20xb $buf')                                # print hex value in the buffer
+    ### testing
+    o, e = g.cmd('call $result = crc32($buf, 20)')  # compute crc32 for the buf
+    ### checking
+    if e or ' = 0x0\n' not in o:                         # check the return value
+        util.print_fail('crc32 result of all 0 is wrong.')
+        ok = False
+
+    ### CRC32 for the Hello World!
+    util.print_green('Unit test the crc32() function with a "Hello World!" string.')
+    g('set $hello = "Hello World!"')
+    g('print $hello')
+    o, e = g.cmd('call crc32(&$hello, strlen($hello))')
+    if ' = 0x67fcdacc' not in o:
+        util.print_fail('crc32 result of the "Hello World!" string is wrong.')
+        ok = False
+
+    ### now test crc32 with a pattern, 20 bytes of 0xAA, and 10 bytes
+    util.print_green('Now test crc32 with a pattern, 20 bytes of 0xAA, and 10 bytes.')
+    g('call memset($buf, 0xAA, 20)')
+    g('x/20xb $buf')
+    o, e = g.cmd('call crc32($buf, 20)')
+    o1, e1 = g.cmd('call crc32($buf, 10)')
+    if e or ' = 0x8b13b3e9\n' not in o or e1 or ' = 0x1646ff3\n' not in o1:
+        util.print_fail('crc32 result is wrong.')
+        ok = False
+
+    ### Now, some negative tests
+    util.print_green('Now, some negative tests, with wrong parameters, NULL pointer, invalid length etc')
+    o, e = g.cmd('call crc32(0)')           # too few parameters
+    o1, e1 = g.cmd('call crc32(0, 20)')     # NULL pointer, this test will crash flowd, as crc32() doesn't check NULL.
+    o2, e2 = g.cmd('call crc32($buf, 0)')   # 0 length, this should be ok and crc32 should return 0.
+    if not e or not e1 or ' = 0x0\n' not in o2:
+        util.print_fail('function crc32 negative tests failed.')
+        ok = False
+    ### clean up
+    g('call free($buf)')
+
+# as the NULL pointer test crashes flowd, let's restart flowd
+flowd.restart_target(wait_online=True)
+# checking the test result
+ok == True
+
+
+#CASE a fresh spice, systemtap
+#DESCRIPT: SystemTap flowd to check the variables and backtrace of a function call triggered by another process.
+
+probes = [
+    dict(type = 'function',
+         name = 'show_version',
+         script = 'printf("Hello World, from SystemTap!\\n") '
+                  'println($$vars$) '               # print local vars
+                  'print_usyms(ubacktrace()) '      # print backtrace
+                  'println("Bye, SystemTap!") '
+                  'exit()'
+         )]
+stap = jfapi.stap(flowd, probes=probes)
+with stap:
+    flowd.vty('show ver')
+o = stap.getbuf()
+"Hello World" in o and 'editor_read_and_parse' in o  # checks the stap probe is hit and backtrace is right.
+
+
+#CASE and a stronger spice, perf
+
+p = jfapi.Perf(flowd)               # open a Perf performance profiler object for flowd
+ws1('ping -f %s' % ws2.dp_ip, expect=None, timeout=0.01)    # start a flood ping through flowd
+p.stat(duration=1)                  # profile cpu statistic for 1 second
+p.record(duration=1)                # record flowd perf sampling for 1 second
+o, e = ws1.ctrl_c()                 # stop the flood ping
+p.show(graph=True, threshold=1)     # show perf report, for functions > 1% usage, with call graph
+' 100% packet loss' not in o        # for flood ping, some packet might drop, but not all
+
+
+#CASE now, a weirdo spice, DIY
+#DESCRIPT: assist human manual steps and help to create new test case.
+
+util.print_red("Mmm, how do I test flowd online, let me try manually...")
+k = util.pause_for_a_key('Manual test? Press Y or N')
+if k in ['y', 'Y']:
+    o, e, r0 = vre.console(rtn_cmdbuf=True)
+    o, e, r1 = flowd.console(rtn_cmdbuf=True)
+    o, e, r2 = devvm.console(rtn_cmdbuf=True)    # if I congest the ctrl path, will it still online?
+    o, e, r3 = gdbflowd.console(rtn_cmdbuf=True) # if I stop flowd, will it still online?
+    util.print_red("Here is a list of the manual steps done in the interactive consoles. Please create a test case with it.")
+    util.print_green('VRE commands: %s' % r0)
+    util.print_green('FlowD commands: %s' % r1)
+    util.print_green('DevVM commands: %s' % r2)
+    util.print_green('GDB-FlowD commands: %s' % r3)
+False  # to mark this manual test as fail.
+
+
+#CASE a procedure
+#DESCRIPT: run a list of commands across devices, as a procedure
+
+hello_world_procedure = [
+    '### A "Hello World" procedure',     # a header title to print
+    '# this is a sample procedure',      # a comment line to print
+    (vre, 'show version'),               # run a command at a device
+    (vre, dict(cmd='show version', timeout=10)),  # same, but with execution parameters
+    (vre, 'show version', 'Model: junosv-\w+'),   # same, but check result with a regex
+    'res = suscapy.sr(IP(dst="google.com")/ICMP(id=1))',# run something at jellyfish itself
+    'res[0].show()',
+    'res[0].show()',
+    (None, 'vre.shell("w")', '128.0.0.2'),        # run from jellyfish, and check result
+    'print("This procedure is executed at %s." % devvm.hostname)',  #
+    (ws1, dict(cmd='ifconfig eth0', timeout=10), 'inet addr:1.1.1.2'),
+    (devvm, dict(cmd='sudo virsh list --all', timeout=10), 'vre +shut off'), # this step will fail
+    'print("It will not reach this step, as previous step fails.")',
+]
+p = jfapi.Procedure(hello_world_procedure)
+p.run(stop_on_err=True, step_by_step=False, loops=1, interval=0)
+
+
+#CASE and a bonus spice, internet
+#DESCRIPT: functions can be defined in test case, to do things of more complixity.
+
+import json
+import re
+import urllib
+def google_search(searchfor):
+    query = urllib.urlencode({'q': searchfor})
+    url = 'http://ajax.googleapis.com/ajax/services/search/web?v=1.0&%s' % query
+    results = urllib.urlopen(url).read()
+    results = json.loads(results)
+    data = results['responseData']
+    print('Total results: %s' % data['cursor']['estimatedResultCount'])
+    hits = data['results']
+    print('Top %d hits:' % len(hits))
+    for h in hits:
+        print('    %s\n        %s' % (re.sub('</*b>', '', h['title']), h['url']))
+    print('For more results, see %s' % data['cursor']['moreResultsUrl'])
+    return len(hits) != 0
+
+google_search('Hello World')
